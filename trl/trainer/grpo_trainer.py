@@ -1755,7 +1755,9 @@ class GRPOTrainer(_BaseTrainer):
         Compute question-level difficulty balancing weights (DQW).
 
         Assigns higher weight to harder questions (lower mean accuracy) using a temperature-scaled softmax over
-        per-question accuracy means. Zero-variance questions receive a neutral weight of 1.
+        per-question accuracy means. Questions with zero or undefined per-group standard deviation (including when
+        fewer than two non-NaN accuracy rewards are available, so the corrected std is NaN) receive a neutral weight
+        of 1.
         The returned weights sum to `num_questions`.
 
         Args:
@@ -1771,7 +1773,7 @@ class GRPOTrainer(_BaseTrainer):
         acc_rewards = rewards_per_func[:, self.dgpo_dqw_acc_reward_index]
         mean_per_q_acc = acc_rewards.view(-1, num_generations).nanmean(dim=1)  # (num_questions,)
         std_per_q_acc = nanstd(acc_rewards.view(-1, num_generations), dim=1)   # (num_questions,)
-        is_std_zero_q = std_per_q_acc < 1e-8
+        is_std_zero_q = torch.isnan(std_per_q_acc) | (std_per_q_acc < 1e-8)
         num_zero_variance_questions = is_std_zero_q.sum().item()
         difficulty_balancing_weights = torch.ones(
             num_questions, device=rewards.device, dtype=rewards.dtype
