@@ -29,7 +29,7 @@ from transformers import PreTrainedTokenizerBase, ProcessorMixin
 DatasetType = TypeVar("DatasetType", Dataset, DatasetDict)
 
 
-def prepare_multimodal_messages(messages: list[dict[str, Any]], images: list) -> list[dict[str, Any]]:
+def prepare_multimodal_messages(messages: list[dict[str, Any]], images: list | None = None) -> list[dict[str, Any]]:
     # docstyle-ignore  # because <Image> is not parsable in the code block
     """
     Convert messages into a structured multimodal format and inject the provided images into the message contents.
@@ -40,8 +40,8 @@ def prepare_multimodal_messages(messages: list[dict[str, Any]], images: list) ->
             List of messages with a `"role"` key (`"system"`, `"user"`, `"assistant"`, or `"tool"`) and a `"content"` key containing
             either a string or a list of structured blocks if already prepared. Optionally, the `"content"` might
             be `None` or not provided in favour of `"tool_calls"` in the `"assistant"` turns if applicable.
-        images (`list`):
-            List of image objects to insert. Can be empty if no images are included in the messages.
+        images (`list`, *optional*):
+            List of image objects to insert in the messages.
 
     Returns:
         `list[dict[str, Any]]`: A deep-copied list of messages where every `"content"` value is a list of structured
@@ -53,8 +53,6 @@ def prepare_multimodal_messages(messages: list[dict[str, Any]], images: list) ->
           the function transforms them into the structured format by wrapping text in `{"type": "text", "text": ...}`
           and inserting `{"type": "image"}` placeholders for the images *before* the first user message.
           If the number of placeholders does not match the number of provided images, an error is raised.
-        - When the input `messages` contains either `"tool_calls"` in the `"assistant"` turns, or `"tool"` roles with
-          `"content"` and `"name"` those are left as-is, since those don't require any specific handling for multimodal data.
 
     Example:
     ```python
@@ -71,7 +69,7 @@ def prepare_multimodal_messages(messages: list[dict[str, Any]], images: list) ->
     ]
     ```
     """
-
+    images = images or []
     messages = copy.deepcopy(messages)  # avoid modifying the original messages
 
     # First, convert all messages to the structured format if needed, and insert image placeholders if needed
@@ -91,9 +89,8 @@ def prepare_multimodal_messages(messages: list[dict[str, Any]], images: list) ->
             if message.get("content") and isinstance(message["content"], str):
                 message["content"] = [{"type": "text", "text": message["content"]}]
         elif message["role"] == "tool":
-            # NOTE: `tool` contains `name` (name of the tool used) and `content` (output of the tool call as a string)
-            # but there's no need to prepare it for multimodal specifically but rather leave it as-is
-            continue
+            if message.get("content") and isinstance(message["content"], str):
+                message["content"] = [{"type": "text", "text": message["content"]}]
         else:
             raise ValueError(
                 f"Invalid role in message: {message['role']}. Expected 'system', 'user', 'assistant', or 'tool'."
@@ -208,6 +205,7 @@ def apply_chat_template(
 
     For more details, see [`maybe_apply_chat_template`].
     """
+    tools = tools or None  # `or None`: Llama bug: it renders tool boilerplate for tools=[]
     # Check that the example has the correct keys
     supported_keys = ["prompt", "chosen", "rejected", "completion", "messages", "label"]
     example_keys = {key for key in example.keys() if key in supported_keys}
@@ -873,70 +871,6 @@ def pack_dataset(
     if strategy in {"bfd", "bfd_split"} and "columns" in format:
         format["columns"] = format["columns"] + ["seq_lengths"]
 
-    dataset = dataset.with_format(**format)
-    return dataset
-
-
-def truncate_dataset(
-    dataset: DatasetType,
-    max_length: int,
-    truncation_mode: str = "keep_start",
-    map_kwargs: dict[str, Any] | None = None,
-) -> DatasetType:
-    r"""
-    Truncate sequences in a dataset to a specified `max_length`.
-
-    Args:
-        dataset ([`~datasets.Dataset`] or [`~datasets.DatasetDict`]):
-            Dataset to truncate.
-        max_length (`int`):
-            Maximum sequence length to truncate to.
-        truncation_mode (`str`, *optional*, defaults to `"keep_start"`):
-            Whether to keep the start (`"keep_start"`) or the end (`"keep_end"`) of the sequence when truncating.
-        map_kwargs (`dict`, *optional*):
-            Additional keyword arguments to pass to the dataset's map method when truncating examples.
-
-    Returns:
-        [`~datasets.Dataset`] or [`~datasets.DatasetDict`]: The dataset with truncated sequences.
-
-    Example:
-    ```python
-    >>> from datasets import Dataset
-
-    >>> examples = {
-    ...     "input_ids": [[1, 2, 3], [4, 5, 6, 7], [8]],
-    ...     "attention_mask": [[0, 1, 1], [0, 0, 1, 1], [1]],
-    ... }
-    >>> dataset = Dataset.from_dict(examples)
-    >>> truncated_dataset = truncate_dataset(dataset, max_length=2)
-    >>> truncated_dataset[:]
-    {'input_ids': [[1, 2], [4, 5], [8]],
-     'attention_mask': [[0, 1], [0, 0], [1]]}
-    ```
-    """
-    if truncation_mode not in {"keep_start", "keep_end"}:
-        raise ValueError(f"Invalid truncation mode '{truncation_mode}'.")
-    if map_kwargs is None:
-        map_kwargs = {}
-
-    def truncate(examples):
-        truncated_columns = []
-        for column in examples.columns:
-            if pyarrow.types.is_list(column.type) or pyarrow.types.is_large_list(column.type):
-                if truncation_mode == "keep_start":
-                    column = pc.list_slice(column, 0, max_length)
-                else:  # keep_end
-                    column = (
-                        pa.array([[] for _ in range(len(column))], type=column.type)
-                        if max_length == 0
-                        else pa.array([values[-max_length:] for values in column.to_pylist()], type=column.type)
-                    )
-            truncated_columns.append(column)
-        return pa.Table.from_arrays(truncated_columns, names=examples.column_names)
-
-    format = _get_dataset_format(dataset)
-    dataset = dataset.with_format("arrow")
-    dataset = dataset.map(truncate, batched=True, **map_kwargs)
     dataset = dataset.with_format(**format)
     return dataset
 
